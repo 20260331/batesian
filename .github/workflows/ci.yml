@@ -1,0 +1,143 @@
+name: CI
+
+# Default: read-only token for jobs that do not declare their own permissions.
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+    tags: ['v*']
+  pull_request:
+    branches: [main, dev]
+  # Manual trigger, for a branch with no open pull request yet and as the way in
+  # when event delivery is unavailable. During the 2026-08-06 Actions incident,
+  # webhooks were throttled to roughly 15% and neither a push nor a
+  # close/reopen produced a run, while the re-run endpoints deadlocked
+  # ("already running" against "has not yet queued"). workflow_dispatch is a
+  # direct API call and does not depend on webhook delivery.
+  workflow_dispatch:
+
+# One run per branch or pull request. A superseded run is cancelled rather than
+# left competing for a runner, which is what made the incident above worse.
+# Tag runs are never cancelled: that is the release path.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # -coverprofile implies -cover, so the per-package coverage percentages are
+      # reported in the job log. The profile itself is not uploaded anywhere.
+      - name: Test
+        run: go test -race -coverprofile=coverage.out ./...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          # Pin to a specific version for reproducibility. Bump intentionally
+          # via a dedicated PR so any new lint rules surface in isolation.
+          version: v2.11.4
+
+  vuln:
+    name: Vulnerability Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+  release:
+    name: Release (goreleaser)
+    runs-on: ubuntu-latest
+    # Tag PUSH only. workflow_dispatch accepts any ref, including a tag, so a
+    # ref test alone would let a manual run re-publish an existing release.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [build, lint, vuln]
+    permissions:
+      contents: write      # create GitHub releases and upload assets
+      id-token: write      # cosign keyless signing via Sigstore OIDC
+      attestations: write  # record SLSA build provenance for the release artifacts
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # syft generates the CycloneDX SBOM goreleaser attaches to each archive.
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+
+      # cosign performs keyless signing of the checksums file using the
+      # workflow's OIDC token. Output: checksums.txt.sig + checksums.txt.pem.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Record SLSA build provenance for each published archive and the checksums
+      # file. This complements the cosign signature (which proves the checksums
+      # came from this pipeline) by attesting how the artifacts were built.
+      # Verify with: gh attestation verify <artifact> --repo calbebop/batesian
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt

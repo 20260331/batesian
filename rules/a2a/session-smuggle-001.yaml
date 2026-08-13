@@ -1,0 +1,57 @@
+id: a2a-session-smuggle-001
+info:
+  name: A2A Agent Role Injection / Session Smuggling
+  author: batesian
+  severity: high
+  description: |
+    Tests whether an A2A server STORES a message the client sent with role
+    "agent". The specification defines the roles by direction: ROLE_USER is
+    client-to-server and ROLE_AGENT is server-to-client. A client-authored turn
+    persisted under the agent role is therefore indistinguishable from a genuine
+    agent turn to everything that reads the history back, which is how fake
+    agent-side history reaches a session's LLM context.
+
+    What is reported is the STORED turn, not the acceptance. The specification
+    carries no MUST or SHOULD requiring a server to validate or reject a
+    client-supplied role, and both official SDKs accept one, so acceptance on its
+    own is not a finding. After the server accepts the message the rule reads the
+    task history back, and reports a confirmed exploit only when the message is
+    there under the agent role. A server that rejects the role, or normalizes it
+    to "user", or does not persist the message, is clean. When the history cannot
+    be read back at all, or the reply carried no task, the rule reports not tested:
+    its oracle never ran. Cross-session task-history disclosure is covered
+    separately by a2a-task-idor-001.
+
+    Demonstrated by Palo Alto Networks Unit42 (Oct 2025) against Google ADK
+    financial-assistant sample: achieved system prompt exfiltration and
+    unauthorized stock purchase by injecting agent-role messages into an active
+    session. Any A2A server built on the official a2a-python SDK or Google ADK
+    that does not explicitly validate message.role is potentially affected.
+
+  references:
+    - https://unit42.paloaltonetworks.com/ai-agent-security/
+    - https://a2a-protocol.org/latest/specification/
+    - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+    - https://cwe.mitre.org/data/definitions/384.html
+    - https://cwe.mitre.org/data/definitions/20.html
+
+  tags:
+    - a2a
+    - injection
+    - session
+    - role-confusion
+    - owasp-agentic-top10
+    - cwe-384
+    - cwe-20
+
+attack:
+  protocol: a2a
+  type: agent-role-injection
+
+remediation: |
+  Validate the message.role field server-side before processing any message/send
+  request. Reject requests where role is not "user" with JSON-RPC error -32602
+  (Invalid params). Additionally, bind task and context lookups to the authenticated
+  session identity at creation time: tasks/get should only return tasks whose
+  contextId was created by the requesting caller, returning -32001 (TaskNotFoundError)
+  for cross-session access attempts.

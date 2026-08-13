@@ -1,0 +1,65 @@
+name: CodeQL
+
+# Static analysis for the Go source. golangci-lint covers style and correctness
+# linting; CodeQL adds dataflow-based security analysis (injection, path
+# traversal, unsafe deserialization, credential handling) and reports into the
+# Security tab. Both run on every push and pull request.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    # Weekly, Monday 06:15 UTC. Catches newly published CodeQL queries against
+    # code that has not otherwise changed.
+    - cron: '15 6 * * 1'
+  # Manual trigger, for the reason given in ci.yml: it does not depend on
+  # webhook delivery, so it still works when event delivery is degraded.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze Go
+    runs-on: ubuntu-latest
+    permissions:
+      # Needed to upload results to the code-scanning dashboard.
+      security-events: write
+      # Needed by the action to read workflow run metadata.
+      actions: read
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Pin the toolchain to the version go.mod requires so autobuild does not
+      # fall back to whatever Go ships on the runner image.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
+        with:
+          languages: go
+          queries: security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
+        with:
+          category: "/language:go"
